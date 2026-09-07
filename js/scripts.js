@@ -470,11 +470,11 @@
     });
   }
 
-  /* ── ClickSpark ────────────────────────────────────────────────────────
-   * Efecto de clic: chispas radiales que se disparan desde el punto de
-   * clic + un anillo que se expande y se desvanece. Implementación propia
-   * con Canvas. Respeta DPR y prefers-reduced-motion (sin animación en
-   * ese caso).
+  /* ── ClickSpark ───────────────────────────────────────────────────────
+   * Ripple refinado: glow de marca (acento azul), núcleo blanco breve y
+   * dos anillos concéntricos escalonados (blanco + acento). Coste acotado
+   * mediante MAX_PULSES y reanuda el rAF solo con pulsos vivos. Respeta
+   * prefers-reduced-motion y solo se dispara con el botón principal.
    */
   function initClickSpark() {
     const canvas = document.createElement('canvas');
@@ -483,12 +483,16 @@
     document.body.appendChild(canvas);
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+
     const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const dpr = window.devicePixelRatio || 1;
-    let sparks = [];
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const ACCENT = '59, 130, 246';
+    const WHITE = '#ffffff';
+
+    let pulses = [];
     let frame = null;
-    const DURATION = 520; // ms de vida de cada chispa
-    const COLORS = ['#ffffff', '#b3b3b3', '#60a5fa', '#e5e5e5'];
+    const DURATION = 480;
+    const MAX_PULSES = 24;
 
     function resize() {
       canvas.width = window.innerWidth * dpr;
@@ -498,77 +502,94 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
     resize();
-    window.addEventListener('resize', resize);
+    window.addEventListener('resize', resize, { passive: true });
 
-    function easeOutCubic(t) {
-      return 1 - Math.pow(1 - t, 3);
-    }
+    const easeOutExpo = (t) => (t === 1 ? 1 : 1 - Math.pow(2, -10 * t));
 
     function spawn(x, y) {
-      const count = 12;
-      for (let i = 0; i < count; i++) {
-        const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.45;
-        const length = 16 + Math.random() * 22;
-        sparks.push({
-          type: 'spark',
-          x,
-          y,
-          angle,
-          length,
-          delay: Math.random() * 60,
-          color: COLORS[i % COLORS.length],
-          width: 1.1 + Math.random() * 0.9,
-          start: performance.now(),
-        });
-      }
-      // Anillo que se expande desde el punto de clic
-      sparks.push({
-        type: 'ring',
-        x,
-        y,
-        maxRadius: 30 + Math.random() * 10,
-        delay: 0,
-        start: performance.now(),
-      });
+      if (pulses.length >= MAX_PULSES) pulses.shift();
+      pulses.push({ x, y, start: performance.now() });
       if (!frame) tick();
+    }
+
+    function drawGlow(x, y, radius, alpha) {
+      if (alpha <= 0 || radius <= 0) return;
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      grad.addColorStop(0, `rgba(${ACCENT}, ${alpha})`);
+      grad.addColorStop(0.45, `rgba(${ACCENT}, ${alpha * 0.35})`);
+      grad.addColorStop(1, `rgba(${ACCENT}, 0)`);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawCore(x, y, radius, alpha) {
+      if (alpha <= 0 || radius <= 0) return;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = WHITE;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawRing(x, y, radius, width, alpha, color, blur) {
+      if (alpha <= 0 || radius <= 0) return;
+      ctx.save();
+      if (blur > 0) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = blur;
+      }
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
     }
 
     function tick() {
       const now = performance.now();
-      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
-      sparks = sparks.filter((s) => now - s.start < DURATION);
-      sparks.forEach((s) => {
-        const t = Math.min((now - s.start) / DURATION, 1);
-        if (t <= s.delay / DURATION) return;
-        const local = Math.min((now - s.start - s.delay) / DURATION, 1);
-        const ease = easeOutCubic(local);
-        const alpha = Math.max(1 - local, 0);
-        if (s.type === 'ring') {
-          ctx.globalAlpha = alpha * 0.45;
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1.4;
-          ctx.beginPath();
-          ctx.arc(s.x, s.y, 2 + s.maxRadius * ease, 0, Math.PI * 2);
-          ctx.stroke();
-        } else {
-          const dist = s.length * ease;
-          ctx.globalAlpha = alpha;
-          ctx.strokeStyle = s.color;
-          ctx.lineWidth = s.width;
-          ctx.lineCap = 'round';
-          ctx.beginPath();
-          ctx.moveTo(s.x + Math.cos(s.angle) * dist * 0.25, s.y + Math.sin(s.angle) * dist * 0.25);
-          ctx.lineTo(s.x + Math.cos(s.angle) * dist, s.y + Math.sin(s.angle) * dist);
-          ctx.stroke();
+      ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+      pulses = pulses.filter((p) => now - p.start < DURATION);
+
+      for (const p of pulses) {
+        const t = (now - p.start) / DURATION;
+        const e = easeOutExpo(t);
+
+        // 1. Glow de marca: halo sutil, se expande rápido y se desvanece.
+        const gT = Math.min(t / 0.35, 1);
+        drawGlow(p.x, p.y, 6 + 38 * easeOutExpo(gT), (1 - gT) * 0.28);
+
+        // 2. Núcleo blanco: destello breve y nítido.
+        if (t < 0.18) {
+          const cT = t / 0.18;
+          drawCore(p.x, p.y, 1 + 2.5 * (1 - cT), (1 - cT) * 0.9);
         }
-      });
-      ctx.globalAlpha = 1;
-      frame = sparks.length ? requestAnimationFrame(tick) : null;
+
+        // 3. Dos ondas concéntricas (sutil → marca).
+        for (const r of [
+          { delay: 0.00, max: 22, width: 1.2, peak: 0.7,  blur: 4, color: WHITE },
+          { delay: 0.10, max: 30, width: 1.0, peak: 0.45, blur: 6, color: `rgb(${ACCENT})` },
+        ]) {
+          const local = (t - r.delay) / (1 - r.delay);
+          if (local <= 0 || local >= 1) continue;
+          const alpha = Math.pow(1 - local, 1.5) * r.peak;
+          const radius = 3 + r.max * e;
+          drawRing(p.x, p.y, radius, r.width, alpha, r.color, r.blur);
+        }
+      }
+
+      frame = pulses.length ? requestAnimationFrame(tick) : null;
     }
 
     document.addEventListener('pointerdown', (e) => {
-      // Solo botón principal: evita chispas con clic derecho (menú contextual)
-      // o clic central (abrir en pestaña nueva).
       if (e.button !== 0) return;
       if (!prefersReduced) spawn(e.clientX, e.clientY);
     });
